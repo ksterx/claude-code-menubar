@@ -28,10 +28,18 @@ SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CRAB_SRC     = _resource("cc-menubar-icon.png")
 FRAMES_DIR   = Path.home() / "Library" / "Caches" / "com.ksterx.MenubarCC" / "frames"
-HOOKS_CONFIG_DEFAULT = Path.home() / ".claude" / "hooks" / "config" / "hooks-config.json"
-HOOKS_CONFIG_LOCAL   = Path.home() / ".claude" / "hooks" / "config" / "hooks-config.local.json"
-APP_SUPPORT_DIR      = Path.home() / "Library" / "Application Support" / "com.ksterx.MenubarCC"
-APP_SETTINGS_PATH    = APP_SUPPORT_DIR / "settings.json"
+
+APP_SUPPORT_DIR   = Path.home() / "Library" / "Application Support" / "com.ksterx.MenubarCC"
+APP_SETTINGS_PATH = APP_SUPPORT_DIR / "settings.json"     # app-only prefs (animFps)
+HOOK_CONFIG_PATH  = APP_SUPPORT_DIR / "hook-config.json"  # shared with menubarcc_hook.py
+
+# Where the hook bridge gets installed. Both the script and the Claude Code
+# settings file live under ~/.claude.
+HOOK_SCRIPT_SRC      = _resource("menubarcc_hook.py")
+HOOK_SCRIPT_INSTALL  = Path.home() / ".claude" / "hooks" / "scripts" / "menubarcc_hook.py"
+CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+HOOK_COMMAND_MARKER  = "menubarcc_hook.py"   # used to detect our entries
+
 STUCK_SECS   = 600
 REFRESH_SECS = 10
 
@@ -45,12 +53,11 @@ SPEED_PRESETS: list[tuple[str, float]] = [
 ]
 DEFAULT_ANIM_FPS = 0.12
 
-# Hook events that the user can mute / customize per-event from the menu bar.
-CONTROLLED_HOOK_EVENTS: list[tuple[str, str, str]] = [
-    # (event_name, disable_flag_key, human_label)
-    ("Stop",              "disableStopHook",              "Stop (response end)"),
-    ("Notification",      "disableNotificationHook",      "Notification"),
-    ("PermissionRequest", "disablePermissionRequestHook", "Permission Request"),
+# Hook events MenubarCC controls. The label is shown in the menu.
+CONTROLLED_HOOK_EVENTS: list[tuple[str, str]] = [
+    ("Stop",              "Stop (response end)"),
+    ("Notification",      "Notification"),
+    ("PermissionRequest", "Permission Request"),
 ]
 
 
@@ -205,33 +212,159 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def load_hooks_config_merged() -> dict:
-    """default + local (local overrides default). For display purposes."""
-    cfg = _read_json(HOOKS_CONFIG_DEFAULT)
-    cfg.update(_read_json(HOOKS_CONFIG_LOCAL))
-    return cfg
+def load_hook_config() -> dict:
+    """MenubarCC hook config — single source of truth, shared with menubarcc_hook.py."""
+    return _read_json(HOOK_CONFIG_PATH)
 
 
-def load_hooks_local() -> dict:
-    """Load only the local config — used as the basis for writes."""
-    return _read_json(HOOKS_CONFIG_LOCAL)
+def save_hook_config(cfg: dict) -> None:
+    _write_json_atomic(HOOK_CONFIG_PATH, cfg)
 
 
-def save_hooks_local(cfg: dict) -> None:
-    _write_json_atomic(HOOKS_CONFIG_LOCAL, cfg)
-
-
-def update_hooks_local(**changes) -> None:
-    """Merge given keys into the local config and save. soundPaths is dict-merged."""
-    cfg = load_hooks_local()
+def update_hook_config(**changes) -> None:
+    """Merge given keys into the hook config and save.
+    Nested dicts (perEventEnabled, soundPaths) are dict-merged, not replaced."""
+    cfg = load_hook_config()
     for key, value in changes.items():
-        if key == "soundPaths" and isinstance(value, dict):
-            paths = dict(cfg.get("soundPaths") or {})
-            paths.update(value)
-            cfg["soundPaths"] = paths
+        if key in ("soundPaths", "perEventEnabled") and isinstance(value, dict):
+            sub = dict(cfg.get(key) or {})
+            sub.update(value)
+            cfg[key] = sub
         else:
             cfg[key] = value
-    save_hooks_local(cfg)
+    save_hook_config(cfg)
+
+
+def is_event_enabled(cfg: dict, event: str) -> bool:
+    """Default to True so a fresh install beeps until the user changes it."""
+    return bool((cfg.get("perEventEnabled") or {}).get(event, True))
+
+
+# ── Hook installer ───────────────────────────────────────────────────────────
+
+def _hook_command_for_event() -> str:
+    # `python3` keeps us independent of any specific Python install location.
+    return f"python3 {HOOK_SCRIPT_INSTALL}"
+
+
+def _read_claude_settings() -> dict:
+    return _read_json(CLAUDE_SETTINGS_PATH)
+
+
+def _backup_claude_settings() -> Path | None:
+    """Copy ~/.claude/settings.json to a timestamped sibling file. Returns the backup path."""
+    if not CLAUDE_SETTINGS_PATH.exists():
+        return None
+    # Stamp by mtime to avoid depending on wall-clock import (kept simple)
+    import time as _t
+    stamp = _t.strftime("%Y%m%d-%H%M%S", _t.localtime())
+    backup = CLAUDE_SETTINGS_PATH.with_suffix(f".json.bak.{stamp}")
+    backup.write_bytes(CLAUDE_SETTINGS_PATH.read_bytes())
+    return backup
+
+
+def _hooks_section_has_menubarcc(section: list) -> bool:
+    """Return True if the given Claude Code hook section already references our script."""
+    for group in section or []:
+        for h in (group or {}).get("hooks", []) or []:
+            cmd = h.get("command", "") if isinstance(h, dict) else ""
+            if HOOK_COMMAND_MARKER in cmd:
+                return True
+    return False
+
+
+def hooks_are_installed() -> bool:
+    """True when both the script is in place and settings.json references it."""
+    if not HOOK_SCRIPT_INSTALL.exists():
+        return False
+    settings = _read_claude_settings()
+    hooks_root = settings.get("hooks") or {}
+    return all(
+        _hooks_section_has_menubarcc(hooks_root.get(event) or [])
+        for event, _ in CONTROLLED_HOOK_EVENTS
+    )
+
+
+def install_hooks() -> tuple[bool, str]:
+    """
+    Copy the bridge script and register it in ~/.claude/settings.json.
+    Returns (ok, message).
+    """
+    try:
+        if not HOOK_SCRIPT_SRC.is_file():
+            return False, f"Bundled hook script not found at {HOOK_SCRIPT_SRC}"
+
+        HOOK_SCRIPT_INSTALL.parent.mkdir(parents=True, exist_ok=True)
+        HOOK_SCRIPT_INSTALL.write_bytes(HOOK_SCRIPT_SRC.read_bytes())
+        HOOK_SCRIPT_INSTALL.chmod(0o755)
+
+        backup = _backup_claude_settings()
+        settings = _read_claude_settings()
+        hooks_root = dict(settings.get("hooks") or {})
+
+        command = _hook_command_for_event()
+        for event, _ in CONTROLLED_HOOK_EVENTS:
+            section = list(hooks_root.get(event) or [])
+            if not _hooks_section_has_menubarcc(section):
+                section.append({
+                    "hooks": [{
+                        "type":    "command",
+                        "command": command,
+                        "timeout": 5000,
+                        "async":   True,
+                    }],
+                })
+            hooks_root[event] = section
+
+        settings["hooks"] = hooks_root
+        _write_json_atomic(CLAUDE_SETTINGS_PATH, settings)
+
+        msg = "Hooks installed."
+        if backup:
+            msg += f" Previous settings backed up to {backup.name}."
+        return True, msg
+    except Exception as e:
+        return False, f"Install failed: {e}"
+
+
+def uninstall_hooks() -> tuple[bool, str]:
+    """Remove our entries from settings.json and delete the installed script."""
+    try:
+        backup = _backup_claude_settings()
+        settings = _read_claude_settings()
+        hooks_root = dict(settings.get("hooks") or {})
+
+        for event in list(hooks_root.keys()):
+            cleaned = []
+            for group in hooks_root.get(event) or []:
+                inner = [
+                    h for h in (group or {}).get("hooks", []) or []
+                    if HOOK_COMMAND_MARKER not in (h.get("command", "") if isinstance(h, dict) else "")
+                ]
+                if inner:
+                    new_group = dict(group)
+                    new_group["hooks"] = inner
+                    cleaned.append(new_group)
+            if cleaned:
+                hooks_root[event] = cleaned
+            else:
+                hooks_root.pop(event, None)
+
+        if hooks_root:
+            settings["hooks"] = hooks_root
+        else:
+            settings.pop("hooks", None)
+        _write_json_atomic(CLAUDE_SETTINGS_PATH, settings)
+
+        if HOOK_SCRIPT_INSTALL.exists():
+            HOOK_SCRIPT_INSTALL.unlink()
+
+        msg = "Hooks uninstalled."
+        if backup:
+            msg += f" Previous settings backed up to {backup.name}."
+        return True, msg
+    except Exception as e:
+        return False, f"Uninstall failed: {e}"
 
 
 def load_app_settings() -> dict:
@@ -425,7 +558,7 @@ class CCApp(rumps.App):
         items.append(None)
 
         # Top-level Tailscale-style toggle for quick mute control
-        cfg = load_hooks_config_merged()
+        cfg = load_hook_config()
         muted = bool(cfg.get("muteAll", False))
         # New handler list — releasing old handlers is safe because the old
         # menu items they were bound to are about to be removed by menu.clear()
@@ -455,26 +588,28 @@ class CCApp(rumps.App):
         root = rumps.MenuItem("Advanced Settings")
         root.add(self._build_sound_menu())
         root.add(self._build_speed_menu())
+        root.add(None)
+        root.add(self._build_install_menu())
         return root
 
     # ── Notification Sounds submenu ─────────────────────────────────────
     def _build_sound_menu(self) -> rumps.MenuItem:
-        cfg = load_hooks_config_merged()
+        cfg = load_hook_config()
         muted = bool(cfg.get("muteAll", False))
         sound_paths = cfg.get("soundPaths") or {}
 
         root = rumps.MenuItem("Notification Sounds")
 
-        for event, flag_key, label in CONTROLLED_HOOK_EVENTS:
-            disabled = bool(cfg.get(flag_key, False))
-            item = rumps.MenuItem(label, callback=self._make_toggle_event_callback(flag_key))
-            item.state = 0 if disabled else 1
+        for event, label in CONTROLLED_HOOK_EVENTS:
+            enabled = is_event_enabled(cfg, event)
+            item = rumps.MenuItem(label, callback=self._make_toggle_event_callback(event))
+            item.state = 1 if enabled else 0
             if muted:
-                item.set_callback(None)  # grey out while muted
+                item.set_callback(None)  # grey out while master-muted
             root.add(item)
         root.add(None)
 
-        for event, _flag_key, _label in CONTROLLED_HOOK_EVENTS:
+        for event, _label in CONTROLLED_HOOK_EVENTS:
             current = sound_paths.get(event)
             suffix = f"  ({Path(current).name})" if current else "  (Default)"
             choose = rumps.MenuItem(
@@ -486,6 +621,51 @@ class CCApp(rumps.App):
         root.add(rumps.MenuItem("Reset All Custom Sounds", callback=self._reset_all_sounds))
 
         return root
+
+    # ── Install / Uninstall submenu ─────────────────────────────────────
+    def _build_install_menu(self) -> rumps.MenuItem:
+        if hooks_are_installed():
+            return rumps.MenuItem(
+                "Uninstall Hook from Claude Code",
+                callback=self._uninstall_hook,
+            )
+        return rumps.MenuItem(
+            "Install Hook into Claude Code…",
+            callback=self._install_hook,
+        )
+
+    def _install_hook(self, _sender):
+        if rumps.alert(
+            title="Install MenubarCC hook?",
+            message=(
+                "This will copy menubarcc_hook.py into ~/.claude/hooks/scripts/ "
+                "and register Stop / Notification / PermissionRequest hooks in "
+                "~/.claude/settings.json. A timestamped backup of settings.json "
+                "will be created first."
+            ),
+            ok="Install",
+            cancel="Cancel",
+        ) != 1:
+            return
+        ok, msg = install_hooks()
+        rumps.alert(title="MenubarCC", message=msg)
+        self._refresh(None)
+
+    def _uninstall_hook(self, _sender):
+        if rumps.alert(
+            title="Uninstall MenubarCC hook?",
+            message=(
+                "This will remove our entries from ~/.claude/settings.json "
+                "(creating a backup first) and delete the installed "
+                "menubarcc_hook.py script."
+            ),
+            ok="Uninstall",
+            cancel="Cancel",
+        ) != 1:
+            return
+        ok, msg = uninstall_hooks()
+        rumps.alert(title="MenubarCC", message=msg)
+        self._refresh(None)
 
     # ── Crab Speed submenu ──────────────────────────────────────────────
     def _build_speed_menu(self) -> rumps.MenuItem:
@@ -500,23 +680,18 @@ class CCApp(rumps.App):
         return root
 
     # ── Notification sound callbacks ───────────────────────────────────
-    def _toggle_mute_all(self, sender):
-        new_value = not bool(sender.state)
-        update_hooks_local(muteAll=new_value)
-        self._refresh(None)
-
     def _on_notifications_switch(self, switch_on: bool):
         # Switch ON  → notifications enabled  → muteAll = False
         # Switch OFF → notifications muted    → muteAll = True
-        update_hooks_local(muteAll=not switch_on)
+        update_hook_config(muteAll=not switch_on)
         # Don't rebuild the menu here — that would close it mid-toggle.
         # The subtitle ("On"/"Muted") updates on the next refresh tick.
 
-    def _make_toggle_event_callback(self, flag_key: str):
+    def _make_toggle_event_callback(self, event_name: str):
         def _cb(sender):
             # state == 1 means enabled (checked) → user wants to disable it
-            new_disabled = bool(sender.state)
-            update_hooks_local(**{flag_key: new_disabled})
+            new_enabled = not bool(sender.state)
+            update_hook_config(perEventEnabled={event_name: new_enabled})
             self._refresh(None)
         return _cb
 
@@ -524,14 +699,14 @@ class CCApp(rumps.App):
         def _cb(_sender):
             path = self._prompt_sound_file(event_name)
             if path:
-                update_hooks_local(soundPaths={event_name: path})
+                update_hook_config(soundPaths={event_name: path})
                 self._refresh(None)
         return _cb
 
     def _reset_all_sounds(self, _sender):
-        cfg = load_hooks_local()
-        cfg["soundPaths"] = {event: None for event, _, _ in CONTROLLED_HOOK_EVENTS}
-        save_hooks_local(cfg)
+        cfg = load_hook_config()
+        cfg["soundPaths"] = {event: None for event, _ in CONTROLLED_HOOK_EVENTS}
+        save_hook_config(cfg)
         self._refresh(None)
 
     def _prompt_sound_file(self, event_name: str) -> str | None:

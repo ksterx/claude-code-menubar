@@ -1,7 +1,7 @@
 from setuptools import setup
 
 APP = ["cc_menubar.py"]
-DATA_FILES = ["cc-menubar-icon.png"]
+DATA_FILES = ["cc-menubar-icon.png", "menubarcc_hook.py"]
 OPTIONS = {
     "argv_emulation": False,
     "plist": {
