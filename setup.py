@@ -1,4 +1,12 @@
+import sys
+from pathlib import Path
+
 from setuptools import setup
+
+# Resolve dylibs relative to the Python that's running this build.
+# Works whether miniconda lives in /opt/homebrew/Caskroom/miniconda/base,
+# /opt/miniconda3, or anywhere else.
+PY_LIB = Path(sys.executable).resolve().parent.parent / "lib"
 
 APP = ["cc_menubar.py"]
 DATA_FILES = ["cc-menubar-icon.png", "menubarcc_hook.py"]
@@ -8,14 +16,18 @@ OPTIONS = {
         "CFBundleName": "MenubarCC",
         "CFBundleDisplayName": "MenubarCC",
         "CFBundleIdentifier": "com.ksterx.MenubarCC",
-        "CFBundleVersion": "1.3.1",
-        "CFBundleShortVersionString": "1.3.1",
+        "CFBundleVersion": "1.3.2",
+        "CFBundleShortVersionString": "1.3.2",
         "LSUIElement": True,          # メニューバーのみ（Dockに出ない）
         "NSMicrophoneUsageDescription": "",
     },
     "packages": ["rumps", "PIL", "certifi"],
     "includes": ["AppKit", "Foundation", "ssl"],
-    "frameworks": ["/opt/homebrew/Caskroom/miniconda/base/lib/libffi.8.dylib"],
+    "frameworks": [
+        str(PY_LIB / "libffi.8.dylib"),
+        str(PY_LIB / "libssl.3.dylib"),
+        str(PY_LIB / "libcrypto.3.dylib"),
+    ],
     "iconfile": "MenubarCC.icns",
 }
 
