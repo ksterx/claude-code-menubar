@@ -26,10 +26,31 @@ def _resource(filename: str) -> Path:
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CRAB_SRC     = _resource("cc-menubar-icon.png")
-FRAMES_DIR   = Path.home() / "Library" / "Caches" / "com.ksterx.cc-monitor" / "frames"
+FRAMES_DIR   = Path.home() / "Library" / "Caches" / "com.ksterx.MenubarCC" / "frames"
+HOOKS_CONFIG_DEFAULT = Path.home() / ".claude" / "hooks" / "config" / "hooks-config.json"
+HOOKS_CONFIG_LOCAL   = Path.home() / ".claude" / "hooks" / "config" / "hooks-config.local.json"
+APP_SUPPORT_DIR      = Path.home() / "Library" / "Application Support" / "com.ksterx.MenubarCC"
+APP_SETTINGS_PATH    = APP_SUPPORT_DIR / "settings.json"
 STUCK_SECS   = 600
-ANIM_FPS     = 0.12   # seconds per frame
 REFRESH_SECS = 10
+
+# Animation speed presets (seconds per frame). Lower = faster.
+SPEED_PRESETS: list[tuple[str, float]] = [
+    ("とても遅い", 0.30),
+    ("遅い",       0.20),
+    ("普通",       0.12),
+    ("速い",       0.08),
+    ("とても速い", 0.04),
+]
+DEFAULT_ANIM_FPS = 0.12
+
+# Hook events that the user can mute / customize per-event from the menu bar.
+CONTROLLED_HOOK_EVENTS: list[tuple[str, str, str]] = [
+    # (event_name, disable_flag_key, human_label)
+    ("Stop",              "disableStopHook",              "Stop（応答終了）"),
+    ("Notification",      "disableNotificationHook",      "Notification（通知）"),
+    ("PermissionRequest", "disablePermissionRequestHook", "PermissionRequest（許可要求）"),
+]
 
 
 # ── フレーム生成 ──────────────────────────────────────────────────────────────
@@ -163,6 +184,64 @@ def make_header(text: str) -> rumps.MenuItem:
     return item
 
 
+# ── 設定ファイル I/O ────────────────────────────────────────────────────────
+
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+def load_hooks_config_merged() -> dict:
+    """default + local（local が default を上書き）。表示用。"""
+    cfg = _read_json(HOOKS_CONFIG_DEFAULT)
+    cfg.update(_read_json(HOOKS_CONFIG_LOCAL))
+    return cfg
+
+
+def load_hooks_local() -> dict:
+    """書き込み用に local 設定だけを読む。"""
+    return _read_json(HOOKS_CONFIG_LOCAL)
+
+
+def save_hooks_local(cfg: dict) -> None:
+    _write_json_atomic(HOOKS_CONFIG_LOCAL, cfg)
+
+
+def update_hooks_local(**changes) -> None:
+    """指定キーだけ local 設定にマージして保存。soundPaths は dict マージ。"""
+    cfg = load_hooks_local()
+    for key, value in changes.items():
+        if key == "soundPaths" and isinstance(value, dict):
+            paths = dict(cfg.get("soundPaths") or {})
+            paths.update(value)
+            cfg["soundPaths"] = paths
+        else:
+            cfg[key] = value
+    save_hooks_local(cfg)
+
+
+def load_app_settings() -> dict:
+    return _read_json(APP_SETTINGS_PATH)
+
+
+def save_app_settings(cfg: dict) -> None:
+    _write_json_atomic(APP_SETTINGS_PATH, cfg)
+
+
 # ── アプリ ───────────────────────────────────────────────────────────────────
 
 ICON_PT_H = 16   # メニューバーアイコンの表示高さ（ポイント）
@@ -190,10 +269,18 @@ class CCApp(rumps.App):
         self._known_stuck: set[str] = set()
         self._tool_count   = 0
         self._last_tool_at = 0.0
+
+        # アニメーション速度をユーザー設定から復元（無ければデフォルト）
+        app_cfg = load_app_settings()
+        self._anim_fps = float(app_cfg.get("animFps", DEFAULT_ANIM_FPS))
+
+        # 動的に interval を変えたいので @rumps.timer ではなく Timer インスタンスを保持
+        self._anim_timer = rumps.Timer(self._animate, self._anim_fps)
+        self._anim_timer.start()
+
         self._refresh(None)           # 初回データ取得
 
-    # ── アニメーション（120ms）────────────────────────────────────────────
-    @rumps.timer(ANIM_FPS)
+    # ── アニメーション（速度はユーザー設定）─────────────────────────────
     def _animate(self, _):
         state = self._anim_state
         if state == "walk":
@@ -283,11 +370,118 @@ class CCApp(rumps.App):
         items.append(None)
         items.append(rumps.MenuItem("今すぐ更新", callback=self._refresh))
         items.append(None)
+        items.append(self._build_sound_menu())
+        items.append(self._build_speed_menu())
+        items.append(None)
         items.append(rumps.MenuItem("終了", callback=rumps.quit_application))
 
         self.menu.clear()
         for item in items:
             self.menu.add(item)
+
+    # ── 通知音メニュー ──────────────────────────────────────────────────
+    def _build_sound_menu(self) -> rumps.MenuItem:
+        cfg = load_hooks_config_merged()
+        muted = bool(cfg.get("muteAll", False))
+        sound_paths = cfg.get("soundPaths") or {}
+
+        root = rumps.MenuItem("通知音")
+
+        mute_item = rumps.MenuItem("すべてミュート", callback=self._toggle_mute_all)
+        mute_item.state = 1 if muted else 0
+        root.add(mute_item)
+        root.add(None)
+
+        for event, flag_key, label in CONTROLLED_HOOK_EVENTS:
+            disabled = bool(cfg.get(flag_key, False))
+            item = rumps.MenuItem(label, callback=self._make_toggle_event_callback(flag_key))
+            item.state = 0 if disabled else 1
+            if muted:
+                item.set_callback(None)  # ミュート中はグレーアウト
+            root.add(item)
+        root.add(None)
+
+        for event, _flag_key, label in CONTROLLED_HOOK_EVENTS:
+            current = sound_paths.get(event)
+            suffix = f"  ({Path(current).name})" if current else "  (デフォルト)"
+            choose = rumps.MenuItem(
+                f"{event} の音を選択…{suffix}",
+                callback=self._make_choose_sound_callback(event),
+            )
+            root.add(choose)
+        root.add(None)
+        root.add(rumps.MenuItem("カスタム音をすべて解除", callback=self._reset_all_sounds))
+
+        return root
+
+    # ── 速度メニュー ────────────────────────────────────────────────────
+    def _build_speed_menu(self) -> rumps.MenuItem:
+        root = rumps.MenuItem("カニの速度")
+        current = self._anim_fps
+        # 最も近いプリセットにチェック
+        closest = min(SPEED_PRESETS, key=lambda p: abs(p[1] - current))[1]
+        for label, fps in SPEED_PRESETS:
+            item = rumps.MenuItem(label, callback=self._make_set_speed_callback(fps))
+            item.state = 1 if abs(fps - closest) < 1e-6 else 0
+            root.add(item)
+        return root
+
+    # ── 通知音コールバック ──────────────────────────────────────────────
+    def _toggle_mute_all(self, sender):
+        new_value = not bool(sender.state)
+        update_hooks_local(muteAll=new_value)
+        self._refresh(None)
+
+    def _make_toggle_event_callback(self, flag_key: str):
+        def _cb(sender):
+            # state == 1 (チェック中 = enabled) → disable に切り替え
+            new_disabled = bool(sender.state)
+            update_hooks_local(**{flag_key: new_disabled})
+            self._refresh(None)
+        return _cb
+
+    def _make_choose_sound_callback(self, event_name: str):
+        def _cb(_sender):
+            path = self._prompt_sound_file(event_name)
+            if path:
+                update_hooks_local(soundPaths={event_name: path})
+                self._refresh(None)
+        return _cb
+
+    def _reset_all_sounds(self, _sender):
+        cfg = load_hooks_local()
+        cfg["soundPaths"] = {event: None for event, _, _ in CONTROLLED_HOOK_EVENTS}
+        save_hooks_local(cfg)
+        self._refresh(None)
+
+    def _prompt_sound_file(self, event_name: str) -> str | None:
+        """NSOpenPanel で音ファイルを選択。キャンセル時は None。"""
+        AppKit.NSApp.activateIgnoringOtherApps_(True)
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setTitle_(f"{event_name} に使う音ファイルを選択")
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setAllowedFileTypes_(["mp3", "wav", "m4a", "aiff", "aac", "caf"])
+        if panel.runModal() != 1:
+            return None
+        urls = panel.URLs()
+        if not urls:
+            return None
+        return str(urls[0].path())
+
+    # ── 速度コールバック ────────────────────────────────────────────────
+    def _make_set_speed_callback(self, fps: float):
+        def _cb(_sender):
+            self._anim_fps = fps
+            self._anim_timer.stop()
+            self._anim_timer.interval = fps
+            self._anim_timer.start()
+            settings = load_app_settings()
+            settings["animFps"] = fps
+            save_app_settings(settings)
+            self._refresh(None)
+        return _cb
 
 
 # ── エントリポイント ─────────────────────────────────────────────────────────

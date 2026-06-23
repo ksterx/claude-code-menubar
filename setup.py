@@ -5,9 +5,9 @@ DATA_FILES = ["cc-menubar-icon.png"]
 OPTIONS = {
     "argv_emulation": False,
     "plist": {
-        "CFBundleName": "CC Monitor",
-        "CFBundleDisplayName": "CC Monitor",
-        "CFBundleIdentifier": "com.ksterx.cc-monitor",
+        "CFBundleName": "MenubarCC",
+        "CFBundleDisplayName": "MenubarCC",
+        "CFBundleIdentifier": "com.ksterx.MenubarCC",
         "CFBundleVersion": "1.0.0",
         "CFBundleShortVersionString": "1.0",
         "LSUIElement": True,          # メニューバーのみ（Dockに出ない）
@@ -16,7 +16,7 @@ OPTIONS = {
     "packages": ["rumps", "PIL"],
     "includes": ["AppKit", "Foundation"],
     "frameworks": ["/opt/homebrew/Caskroom/miniconda/base/lib/libffi.8.dylib"],
-    "iconfile": "cc-monitor.icns",
+    "iconfile": "MenubarCC.icns",
 }
 
 setup(
