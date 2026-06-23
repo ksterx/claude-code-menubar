@@ -10,12 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 import AppKit
+import objc
 from PIL import Image, ImageDraw
 import rumps
 
 
 def _resource(filename: str) -> Path:
-    """app bundle 内と開発時の両方でリソースを解決する。"""
+    """Resolve a resource path, whether running from an app bundle or source."""
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent.parent / "Resources"
     else:
@@ -36,72 +37,71 @@ REFRESH_SECS = 10
 
 # Animation speed presets (seconds per frame). Lower = faster.
 SPEED_PRESETS: list[tuple[str, float]] = [
-    ("とても遅い", 0.30),
-    ("遅い",       0.20),
-    ("普通",       0.12),
-    ("速い",       0.08),
-    ("とても速い", 0.04),
+    ("Very Slow", 0.30),
+    ("Slow",      0.20),
+    ("Normal",    0.12),
+    ("Fast",      0.08),
+    ("Very Fast", 0.04),
 ]
 DEFAULT_ANIM_FPS = 0.12
 
 # Hook events that the user can mute / customize per-event from the menu bar.
 CONTROLLED_HOOK_EVENTS: list[tuple[str, str, str]] = [
     # (event_name, disable_flag_key, human_label)
-    ("Stop",              "disableStopHook",              "Stop（応答終了）"),
-    ("Notification",      "disableNotificationHook",      "Notification（通知）"),
-    ("PermissionRequest", "disablePermissionRequestHook", "PermissionRequest（許可要求）"),
+    ("Stop",              "disableStopHook",              "Stop (response end)"),
+    ("Notification",      "disableNotificationHook",      "Notification"),
+    ("PermissionRequest", "disablePermissionRequestHook", "Permission Request"),
 ]
 
 
-# ── フレーム生成 ──────────────────────────────────────────────────────────────
+# ── Frame generation ─────────────────────────────────────────────────────────
 
 def build_frames(crab: Image.Image) -> dict:
     FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-    # 透明パディングを除いた実際のカニ領域だけ使う
+    # Crop transparent padding so the crab fits the menu bar tightly
     bbox = crab.getbbox()
     if bbox:
         crab = crab.crop(bbox)
-    cw, ch = crab.size          # 実サイズ（例: 44 × 28）
-    PAD     = 36                # 横移動の余白
-    CW      = cw + PAD          # キャンバス幅 80
-    CH      = 44                # キャンバス高（メニューバー基準）
-    cy      = (CH - ch) // 2   # 縦中央
+    cw, ch = crab.size
+    PAD     = 36                # horizontal travel padding
+    CW      = cw + PAD          # canvas width
+    CH      = 44                # canvas height (menu bar baseline)
+    cy      = (CH - ch) // 2   # vertical center
 
     def blank():
         return Image.new("RGBA", (CW, CH), (0, 0, 0, 0))
 
-    # ── 歩き（右→左） ────────────────────────────────────────────────────
+    # ── Walking (right → left) ───────────────────────────────────────────
     WALK_N = 14
     walk = []
     for i in range(WALK_N):
         t = i / (WALK_N - 1)
-        x = int((1 - t) * PAD)   # PAD→0（右端から左端へ）
+        x = int((1 - t) * PAD)   # PAD → 0
         img = blank()
         img.paste(crab, (x, cy), crab)
         p = FRAMES_DIR / f"walk_{i:02d}.png"
         img.save(p)
         walk.append(str(p))
 
-    # ── バウンス（上下、待ち）────────────────────────────────────────────
+    # ── Bouncing (waiting for user) ──────────────────────────────────────
     BOUNCE_N = 12
-    BOUNCE_H = 8                 # 最大8px上へ
+    BOUNCE_H = 8                 # up to 8px upward
     bounce = []
     for i in range(BOUNCE_N):
-        t = math.sin(math.pi * i / BOUNCE_N)   # 0→1→0
+        t = math.sin(math.pi * i / BOUNCE_N)   # 0 → 1 → 0
         y = cy - int(t * BOUNCE_H)
         img = blank()
-        img.paste(crab, (PAD // 2, y), crab)   # 中央固定
+        img.paste(crab, (PAD // 2, y), crab)
         p = FRAMES_DIR / f"bounce_{i:02d}.png"
         img.save(p)
         bounce.append(str(p))
 
-    # ── パルス（stuck、赤みがかったフラッシュ）──────────────────────────
+    # ── Pulsing (stuck — alpha flash) ────────────────────────────────────
     PULSE_N = 8
     pulse = []
     for i in range(PULSE_N):
         alpha = int(128 + 127 * math.sin(2 * math.pi * i / PULSE_N))
         img = blank()
-        # カニを薄くオーバーレイ（点滅）
         frame = crab.copy()
         r, g, b, a = frame.split()
         a = a.point(lambda v: int(v * alpha / 255))
@@ -111,7 +111,7 @@ def build_frames(crab: Image.Image) -> dict:
         img.save(p)
         pulse.append(str(p))
 
-    # ── 静止（idle）──────────────────────────────────────────────────────
+    # ── Static (idle) ────────────────────────────────────────────────────
     static = blank()
     static.paste(crab, (PAD // 2, cy), crab)
     sp = FRAMES_DIR / "static.png"
@@ -120,7 +120,7 @@ def build_frames(crab: Image.Image) -> dict:
     return {"walk": walk, "bounce": bounce, "pulse": pulse, "static": str(sp)}
 
 
-# ── セッション読み込み ────────────────────────────────────────────────────────
+# ── Session loading ──────────────────────────────────────────────────────────
 
 def _now_ms() -> float:
     return time.time() * 1000
@@ -184,7 +184,7 @@ def make_header(text: str) -> rumps.MenuItem:
     return item
 
 
-# ── 設定ファイル I/O ────────────────────────────────────────────────────────
+# ── Config file I/O ──────────────────────────────────────────────────────────
 
 def _read_json(path: Path) -> dict:
     if not path.exists():
@@ -206,14 +206,14 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
 
 def load_hooks_config_merged() -> dict:
-    """default + local（local が default を上書き）。表示用。"""
+    """default + local (local overrides default). For display purposes."""
     cfg = _read_json(HOOKS_CONFIG_DEFAULT)
     cfg.update(_read_json(HOOKS_CONFIG_LOCAL))
     return cfg
 
 
 def load_hooks_local() -> dict:
-    """書き込み用に local 設定だけを読む。"""
+    """Load only the local config — used as the basis for writes."""
     return _read_json(HOOKS_CONFIG_LOCAL)
 
 
@@ -222,7 +222,7 @@ def save_hooks_local(cfg: dict) -> None:
 
 
 def update_hooks_local(**changes) -> None:
-    """指定キーだけ local 設定にマージして保存。soundPaths は dict マージ。"""
+    """Merge given keys into the local config and save. soundPaths is dict-merged."""
     cfg = load_hooks_local()
     for key, value in changes.items():
         if key == "soundPaths" and isinstance(value, dict):
@@ -242,14 +242,64 @@ def save_app_settings(cfg: dict) -> None:
     _write_json_atomic(APP_SETTINGS_PATH, cfg)
 
 
-# ── アプリ ───────────────────────────────────────────────────────────────────
+# ── Switch-style NSMenuItem (Tailscale-style) ────────────────────────────────
 
-ICON_PT_H = 16   # メニューバーアイコンの表示高さ（ポイント）
+class _SwitchHandler(AppKit.NSObject):
+    """Bridge NSSwitch's target/action selector to a Python callable."""
+
+    def initWithCallback_(self, callback):
+        self = objc.super(_SwitchHandler, self).init()
+        if self is None:
+            return None
+        self._cb = callback
+        return self
+
+    def toggled_(self, sender):
+        self._cb(bool(sender.state()))
+
+
+def make_switch_view(
+    title: str,
+    subtitle: str,
+    on: bool,
+    on_toggle,
+    handler_holder: list,
+) -> AppKit.NSView:
+    """Build an NSView with title + subtitle + NSSwitch, for use as NSMenuItem.view."""
+    width, height = 260, 40
+    view = AppKit.NSView.alloc().initWithFrame_(((0, 0), (width, height)))
+
+    title_field = AppKit.NSTextField.labelWithString_(title)
+    title_field.setFrame_(((14, 19), (180, 16)))
+    title_field.setFont_(AppKit.NSFont.menuFontOfSize_(13))
+    view.addSubview_(title_field)
+
+    sub_field = AppKit.NSTextField.labelWithString_(subtitle)
+    sub_field.setFrame_(((14, 4), (180, 14)))
+    sub_field.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+    sub_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+    view.addSubview_(sub_field)
+
+    sw = AppKit.NSSwitch.alloc().init()
+    sw.setFrame_(((width - 56, 9), (40, 22)))
+    sw.setState_(1 if on else 0)
+    handler = _SwitchHandler.alloc().initWithCallback_(on_toggle)
+    handler_holder.append(handler)  # keep alive (NSSwitch holds a weak ref to target)
+    sw.setTarget_(handler)
+    sw.setAction_("toggled:")
+    view.addSubview_(sw)
+
+    return view
+
+
+# ── App ──────────────────────────────────────────────────────────────────────
+
+ICON_PT_H = 16   # menu bar icon height in points
 
 
 class CCApp(rumps.App):
     def _set_frame(self, path: str):
-        """NSImage のサイズをポイント単位で明示指定してセットする。"""
+        """Set the status bar icon, sizing the NSImage in points."""
         img = AppKit.NSImage.alloc().initWithContentsOfFile_(path)
         w_px, h_px = img.size().width, img.size().height
         scale  = ICON_PT_H / h_px
@@ -270,17 +320,20 @@ class CCApp(rumps.App):
         self._tool_count   = 0
         self._last_tool_at = 0.0
 
-        # アニメーション速度をユーザー設定から復元（無ければデフォルト）
+        # Keep NSObject handlers alive while their menu items are mounted
+        self._switch_handlers: list = []
+
+        # Restore animation speed from user settings (fall back to default)
         app_cfg = load_app_settings()
         self._anim_fps = float(app_cfg.get("animFps", DEFAULT_ANIM_FPS))
 
-        # 動的に interval を変えたいので @rumps.timer ではなく Timer インスタンスを保持
+        # Hold a Timer instance so we can change `interval` at runtime
         self._anim_timer = rumps.Timer(self._animate, self._anim_fps)
         self._anim_timer.start()
 
-        self._refresh(None)           # 初回データ取得
+        self._refresh(None)           # initial data load
 
-    # ── アニメーション（速度はユーザー設定）─────────────────────────────
+    # ── Animation (interval driven by user-selected speed) ──────────────
     def _animate(self, _):
         state = self._anim_state
         if state == "walk":
@@ -290,12 +343,12 @@ class CCApp(rumps.App):
         elif state == "pulse":
             seq = self._frames["pulse"]
         else:
-            return   # idle は静止なので何もしない
+            return   # idle is static — nothing to do
 
         self._anim_idx = (self._anim_idx + 1) % len(seq)
         self._set_frame(seq[self._anim_idx])
 
-    # ── データ更新（10秒）────────────────────────────────────────────────
+    # ── Data refresh (every 10s) ─────────────────────────────────────────
     @rumps.timer(REFRESH_SECS)
     def _refresh(self, _):
         ss      = load_sessions()
@@ -304,7 +357,7 @@ class CCApp(rumps.App):
         waiting = [s for s in ss if s["_waiting"]]
         idle    = [s for s in ss if s.get("status") == "idle" and not s["_waiting"]]
 
-        # ── アニメーション状態を決定 ──────────────────────────────────
+        # ── Decide animation state ───────────────────────────────────
         if stuck:
             new_state = "pulse"
             self.title = f"⚠ {len(stuck)}"
@@ -326,24 +379,24 @@ class CCApp(rumps.App):
         if new_state == "idle":
             self._set_frame(self._frames["static"])
 
-        # ── stuck 通知 ──────────────────────────────────────────────
+        # ── stuck notification ──────────────────────────────────────
         for s in stuck:
             sid = s.get("sessionId", "")
             if sid not in self._known_stuck:
                 rumps.notification(
-                    title="Claude Code — スタック検出",
+                    title="Claude Code — Stuck session",
                     subtitle=s["_dir"],
-                    message=f"{fmt_age(s['_age_s'])} busy のまま更新なし",
+                    message=f"busy for {fmt_age(s['_age_s'])} with no updates",
                 )
         self._known_stuck = {s.get("sessionId", "") for s in stuck}
 
-        # ── ツール数（60秒おき）──────────────────────────────────────
+        # ── Tool-call count (every 60s) ──────────────────────────────
         now = time.time()
         if now - self._last_tool_at > 60:
             self._tool_count  = count_today_tools()
             self._last_tool_at = now
 
-        # ── メニュー再構築 ────────────────────────────────────────────
+        # ── Rebuild menu ─────────────────────────────────────────────
         items: list = []
 
         def add_section(label: str, sessions: list[dict], icon: str):
@@ -357,68 +410,88 @@ class CCApp(rumps.App):
             items.append(None)
 
         if not ss:
-            items.append(rumps.MenuItem("セッションなし"))
+            items.append(rumps.MenuItem("No sessions"))
             items.append(None)
         else:
             add_section(f"⚠   STUCK  ·  {len(stuck)}",   stuck,   "⚠")
             add_section(f"↻   ACTIVE  ·  {len(busy)}",   busy,    "↻")
-            add_section(f"💬  入力待ち  ·  {len(waiting)}", waiting, "💬")
+            add_section(f"💬  WAITING  ·  {len(waiting)}", waiting, "💬")
             add_section(f"·   IDLE  ·  {len(idle)}",     idle,    "·")
 
-        summary = f"今日  {len(ss)} セッション · {self._tool_count} ツール呼び出し"
+        summary = f"Today  {len(ss)} sessions · {self._tool_count} tool calls"
         items.append(make_header(summary))
         items.append(None)
-        items.append(rumps.MenuItem("今すぐ更新", callback=self._refresh))
+        items.append(rumps.MenuItem("Refresh Now", callback=self._refresh))
         items.append(None)
-        items.append(self._build_sound_menu())
-        items.append(self._build_speed_menu())
+
+        # Top-level Tailscale-style toggle for quick mute control
+        cfg = load_hooks_config_merged()
+        muted = bool(cfg.get("muteAll", False))
+        # New handler list — releasing old handlers is safe because the old
+        # menu items they were bound to are about to be removed by menu.clear()
+        self._switch_handlers = []
+        notif_switch = rumps.MenuItem("Notifications")
+        notif_switch._menuitem.setView_(
+            make_switch_view(
+                title="Notifications",
+                subtitle="Muted" if muted else "On",
+                on=not muted,
+                on_toggle=self._on_notifications_switch,
+                handler_holder=self._switch_handlers,
+            )
+        )
+        items.append(notif_switch)
+
+        items.append(self._build_advanced_menu())
         items.append(None)
-        items.append(rumps.MenuItem("終了", callback=rumps.quit_application))
+        items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
         self.menu.clear()
         for item in items:
             self.menu.add(item)
 
-    # ── 通知音メニュー ──────────────────────────────────────────────────
+    # ── Advanced Settings (umbrella menu) ───────────────────────────────
+    def _build_advanced_menu(self) -> rumps.MenuItem:
+        root = rumps.MenuItem("Advanced Settings")
+        root.add(self._build_sound_menu())
+        root.add(self._build_speed_menu())
+        return root
+
+    # ── Notification Sounds submenu ─────────────────────────────────────
     def _build_sound_menu(self) -> rumps.MenuItem:
         cfg = load_hooks_config_merged()
         muted = bool(cfg.get("muteAll", False))
         sound_paths = cfg.get("soundPaths") or {}
 
-        root = rumps.MenuItem("通知音")
-
-        mute_item = rumps.MenuItem("すべてミュート", callback=self._toggle_mute_all)
-        mute_item.state = 1 if muted else 0
-        root.add(mute_item)
-        root.add(None)
+        root = rumps.MenuItem("Notification Sounds")
 
         for event, flag_key, label in CONTROLLED_HOOK_EVENTS:
             disabled = bool(cfg.get(flag_key, False))
             item = rumps.MenuItem(label, callback=self._make_toggle_event_callback(flag_key))
             item.state = 0 if disabled else 1
             if muted:
-                item.set_callback(None)  # ミュート中はグレーアウト
+                item.set_callback(None)  # grey out while muted
             root.add(item)
         root.add(None)
 
-        for event, _flag_key, label in CONTROLLED_HOOK_EVENTS:
+        for event, _flag_key, _label in CONTROLLED_HOOK_EVENTS:
             current = sound_paths.get(event)
-            suffix = f"  ({Path(current).name})" if current else "  (デフォルト)"
+            suffix = f"  ({Path(current).name})" if current else "  (Default)"
             choose = rumps.MenuItem(
-                f"{event} の音を選択…{suffix}",
+                f"Choose {event} sound…{suffix}",
                 callback=self._make_choose_sound_callback(event),
             )
             root.add(choose)
         root.add(None)
-        root.add(rumps.MenuItem("カスタム音をすべて解除", callback=self._reset_all_sounds))
+        root.add(rumps.MenuItem("Reset All Custom Sounds", callback=self._reset_all_sounds))
 
         return root
 
-    # ── 速度メニュー ────────────────────────────────────────────────────
+    # ── Crab Speed submenu ──────────────────────────────────────────────
     def _build_speed_menu(self) -> rumps.MenuItem:
-        root = rumps.MenuItem("カニの速度")
+        root = rumps.MenuItem("Crab Speed")
         current = self._anim_fps
-        # 最も近いプリセットにチェック
+        # Check the preset closest to the current value
         closest = min(SPEED_PRESETS, key=lambda p: abs(p[1] - current))[1]
         for label, fps in SPEED_PRESETS:
             item = rumps.MenuItem(label, callback=self._make_set_speed_callback(fps))
@@ -426,15 +499,22 @@ class CCApp(rumps.App):
             root.add(item)
         return root
 
-    # ── 通知音コールバック ──────────────────────────────────────────────
+    # ── Notification sound callbacks ───────────────────────────────────
     def _toggle_mute_all(self, sender):
         new_value = not bool(sender.state)
         update_hooks_local(muteAll=new_value)
         self._refresh(None)
 
+    def _on_notifications_switch(self, switch_on: bool):
+        # Switch ON  → notifications enabled  → muteAll = False
+        # Switch OFF → notifications muted    → muteAll = True
+        update_hooks_local(muteAll=not switch_on)
+        # Don't rebuild the menu here — that would close it mid-toggle.
+        # The subtitle ("On"/"Muted") updates on the next refresh tick.
+
     def _make_toggle_event_callback(self, flag_key: str):
         def _cb(sender):
-            # state == 1 (チェック中 = enabled) → disable に切り替え
+            # state == 1 means enabled (checked) → user wants to disable it
             new_disabled = bool(sender.state)
             update_hooks_local(**{flag_key: new_disabled})
             self._refresh(None)
@@ -455,10 +535,10 @@ class CCApp(rumps.App):
         self._refresh(None)
 
     def _prompt_sound_file(self, event_name: str) -> str | None:
-        """NSOpenPanel で音ファイルを選択。キャンセル時は None。"""
+        """Open NSOpenPanel to pick a sound file. Returns None on cancel."""
         AppKit.NSApp.activateIgnoringOtherApps_(True)
         panel = AppKit.NSOpenPanel.openPanel()
-        panel.setTitle_(f"{event_name} に使う音ファイルを選択")
+        panel.setTitle_(f"Choose a sound file for {event_name}")
         panel.setCanChooseFiles_(True)
         panel.setCanChooseDirectories_(False)
         panel.setAllowsMultipleSelection_(False)
@@ -470,7 +550,7 @@ class CCApp(rumps.App):
             return None
         return str(urls[0].path())
 
-    # ── 速度コールバック ────────────────────────────────────────────────
+    # ── Speed callbacks ────────────────────────────────────────────────
     def _make_set_speed_callback(self, fps: float):
         def _cb(_sender):
             self._anim_fps = fps
@@ -484,7 +564,7 @@ class CCApp(rumps.App):
         return _cb
 
 
-# ── エントリポイント ─────────────────────────────────────────────────────────
+# ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     crab   = Image.open(str(CRAB_SRC)).convert("RGBA")
