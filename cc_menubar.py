@@ -4,8 +4,13 @@
 import json
 import math
 import os
+import plistlib
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +47,9 @@ HOOK_COMMAND_MARKER  = "menubarcc_hook.py"   # used to detect our entries
 
 STUCK_SECS   = 600
 REFRESH_SECS = 10
+
+GITHUB_LATEST_API   = "https://api.github.com/repos/ksterx/claude-code-menubar/releases/latest"
+GITHUB_RELEASES_URL = "https://github.com/ksterx/claude-code-menubar/releases"
 
 # Animation speed presets (seconds per frame). Lower = faster.
 SPEED_PRESETS: list[tuple[str, float]] = [
@@ -384,6 +392,82 @@ def save_app_settings(cfg: dict) -> None:
     _write_json_atomic(APP_SETTINGS_PATH, cfg)
 
 
+# ── Update check ─────────────────────────────────────────────────────────────
+
+def get_current_version() -> str:
+    """CFBundleShortVersionString from the running bundle, or 'dev' from source."""
+    if getattr(sys, "frozen", False):
+        plist = Path(sys.executable).parent.parent / "Info.plist"
+        try:
+            with open(plist, "rb") as f:
+                return plistlib.load(f).get("CFBundleShortVersionString", "dev")
+        except Exception:
+            return "dev"
+    return "dev"
+
+
+def _parse_version(v: str) -> tuple:
+    """Loose semver parsing. 'v1.2.0' / '1.2' → tuple of ints."""
+    parts = v.lstrip("v").strip().split(".")
+    out = []
+    for p in parts:
+        try:
+            out.append(int(p.split("-")[0]))  # strip pre-release suffix if any
+        except ValueError:
+            break
+    return tuple(out) if out else (0,)
+
+
+def compare_versions(a: str, b: str) -> int:
+    """-1 if a<b, 0 if equal, 1 if a>b."""
+    pa, pb = _parse_version(a), _parse_version(b)
+    return (pa > pb) - (pa < pb)
+
+
+def fetch_latest_release() -> tuple[str, str] | None:
+    """Hit the GitHub API. Returns (tag, html_url) or None on any failure."""
+    try:
+        req = urllib.request.Request(
+            GITHUB_LATEST_API,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "MenubarCC-update-check",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return (data.get("tag_name", ""), data.get("html_url", "") or GITHUB_RELEASES_URL)
+    except Exception:
+        return None
+
+
+class _MainThreadDispatcher(AppKit.NSObject):
+    """Hop a Python callable back to the main thread.
+
+    PyObjC keeps a reference to `self` for the lifetime of the
+    performSelectorOnMainThread call, so a freshly alloc'd dispatcher
+    survives until the selector fires.
+    """
+
+    def initWithCallback_(self, callback):
+        self = objc.super(_MainThreadDispatcher, self).init()
+        if self is None:
+            return None
+        self._cb = callback
+        return self
+
+    def fire_(self, _):
+        try:
+            self._cb()
+        except Exception:
+            pass
+
+
+def run_on_main(callback) -> None:
+    disp = _MainThreadDispatcher.alloc().initWithCallback_(callback)
+    disp.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+
+
 # ── Switch-style NSMenuItem (Tailscale-style) ────────────────────────────────
 
 class _SwitchHandler(AppKit.NSObject):
@@ -563,7 +647,7 @@ class CCApp(rumps.App):
         summary = f"Today  {len(ss)} sessions · {self._tool_count} tool calls"
         items.append(make_header(summary))
         items.append(None)
-        items.append(rumps.MenuItem("Refresh Now", callback=self._refresh))
+        items.append(rumps.MenuItem("Check for Updates…", callback=self._check_updates))
         items.append(None)
 
         # Top-level Tailscale-style toggle for quick mute control
@@ -687,6 +771,44 @@ class CCApp(rumps.App):
             item.state = 1 if abs(fps - closest) < 1e-6 else 0
             root.add(item)
         return root
+
+    # ── Update check ────────────────────────────────────────────────────
+    def _check_updates(self, _sender):
+        def worker():
+            result = fetch_latest_release()
+            run_on_main(lambda: self._on_update_result(result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_result(self, result):
+        current = get_current_version()
+        if result is None:
+            rumps.alert(
+                title="MenubarCC",
+                message="Could not reach GitHub. Check your network connection.",
+            )
+            return
+        tag, html_url = result
+        if not tag:
+            rumps.alert(
+                title="MenubarCC",
+                message="GitHub returned no release info. Try again later.",
+            )
+            return
+        if compare_versions(tag, f"v{current}") <= 0:
+            rumps.alert(
+                title="MenubarCC",
+                message=f"You're up to date (v{current}).",
+            )
+            return
+        if rumps.alert(
+            title=f"MenubarCC {tag} is available",
+            message=(
+                f"You're on v{current}. Open the release page to download the new DMG?"
+            ),
+            ok="Open Release Page",
+            cancel="Later",
+        ) == 1:
+            webbrowser.open(html_url)
 
     # ── Notification sound callbacks ───────────────────────────────────
     def _on_notifications_switch(self, switch_on: bool):
