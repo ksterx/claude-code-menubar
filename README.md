@@ -171,6 +171,6 @@ MenubarCC runs entirely on your machine. It reads your local Claude Code session
 
 ## License
 
-[MIT](LICENSE) © 2026 Kosuke Ishikawa
+[MIT](LICENSE) © 2026 ksterx
 
 <div align="center"><sub>Not affiliated with Anthropic. Claude and Claude Code are products of Anthropic.</sub></div>
