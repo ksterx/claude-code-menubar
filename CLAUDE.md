@@ -20,7 +20,7 @@ macOS メニューバーアプリ **MenubarCC**（rumps / py2app, arm64, Develop
 2. **ビルド** — `rm -rf build dist; <envpy> setup.py py2app` → `dist/MenubarCC.app`。
 3. **DMG**（下記の注意を厳守）。
 4. **スモークテスト** — `dist/MenubarCC.app/Contents/MacOS/MenubarCC` を数秒起動して生存確認（クラッシュ・traceback なし）＋同梱 python (`Contents/MacOS/python`) で SSL→GitHub 疎通確認。
-5. **push & release** — `git push origin main` 後に `gh release create v<ver> ./MenubarCC-<ver>.dmg --repo ksterx/claude-code-menubar --title "MenubarCC v<ver>" --target main --notes "..."`。
+5. **push & release** — `git push origin main` 後に `gh release create v<ver> ./MenubarCC-<ver>.dmg --repo ksterx/MenubarCC --title "MenubarCC v<ver>" --target main --notes "..."`。
 
 ### ⚠️ DMG はステージングフォルダから作る（`-srcfolder dist/MenubarCC.app` は禁止）
 

@@ -80,8 +80,8 @@ STUCK_PRESETS: list[tuple[str, int]] = [
 
 # The HTML "latest" endpoint 302-redirects to /releases/tag/<tag>. Unlike the
 # JSON API it is not rate-limited per IP, so update checks never hit HTTP 403.
-GITHUB_LATEST_REDIRECT = "https://github.com/ksterx/claude-code-menubar/releases/latest"
-GITHUB_RELEASES_URL    = "https://github.com/ksterx/claude-code-menubar/releases"
+GITHUB_LATEST_REDIRECT = "https://github.com/ksterx/MenubarCC/releases/latest"
+GITHUB_RELEASES_URL    = "https://github.com/ksterx/MenubarCC/releases"
 
 # Delay before the first-run install prompt so the menu bar icon
 # appears first and the user knows which app is asking.
