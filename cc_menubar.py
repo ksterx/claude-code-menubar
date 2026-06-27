@@ -144,17 +144,37 @@ def build_frames(crab: Image.Image) -> dict:
         walk.append(str(p))
 
     # ── Bouncing (waiting for user) ──────────────────────────────────────
-    BOUNCE_N = 12
-    BOUNCE_H = 8                 # up to 8px upward
+    # Asymmetric arc to fake gravity: fast takeoff (ease-out), short hang
+    # at the apex, then ease-in descent so each frame closer to the ground
+    # covers more pixels — the crab reads as being yanked down. No ground
+    # hold, so it bounces continuously like a ball.
+    UP_N     = 3    # ascending frames (fast → slow)
+    HANG_N   = 1    # frame at the apex
+    DOWN_N   = 5    # descending frames (slow → fast, the "gravity" part)
+    BOUNCE_H = 16
     bounce = []
-    for i in range(BOUNCE_N):
-        t = math.sin(math.pi * i / BOUNCE_N)   # 0 → 1 → 0
-        y = cy - int(t * BOUNCE_H)
+
+    def add_bounce_frame(y_offset: int):
         img = blank()
-        img.paste(crab, (PAD // 2, y), crab)
-        p = FRAMES_DIR / f"bounce_{i:02d}.png"
+        img.paste(crab, (PAD // 2, cy - y_offset), crab)
+        idx = len(bounce)
+        p = FRAMES_DIR / f"bounce_{idx:02d}.png"
         img.save(p)
         bounce.append(str(p))
+
+    # Ascent — ease-out (1 - (1-t)²) so the first frames cover the most pixels
+    for i in range(UP_N):
+        t = (i + 1) / UP_N
+        h = 1 - (1 - t) ** 2
+        add_bounce_frame(int(h * BOUNCE_H))
+    # Hang at the apex
+    for _ in range(HANG_N):
+        add_bounce_frame(BOUNCE_H)
+    # Descent — ease-in (1 - t²) so the last frames before landing are biggest
+    for i in range(DOWN_N):
+        t = (i + 1) / DOWN_N
+        h = 1 - t ** 2
+        add_bounce_frame(int(h * BOUNCE_H))
 
     # ── Pulsing (stuck — alpha flash) ────────────────────────────────────
     PULSE_N = 8
